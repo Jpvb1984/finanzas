@@ -80,7 +80,7 @@ export function cardInfo(a, txns, today = todayISO()) {
     fromStatement = { v: a.statementBalance + after, at: a.lastImport, src: 'estado + movimientos' };
   }
   const userBal = u.balance != null ? { v: u.balance, at: u.balanceAt, src: 'tuyo' } : null;
-  const cands = [fileBal, fromStatement, userBal].filter(Boolean).sort((x, y) => String(y.at).localeCompare(String(x.at)));
+  const cands = [fileBal, fromStatement, userBal].filter(Boolean).sort((x, y) => String(y.at).localeCompare(String(x.at)) || (y.src === 'tuyo') - (x.src === 'tuyo'));
   if (cands.length) { info.balance = cands[0].v; info.balanceSrc = cands[0].src; }
   else if (info.interestRecent > 0 && info.apr) {
     // Sin saldo en el archivo: lo estimamos con los intereses del mes
@@ -158,7 +158,7 @@ export function fixedExpenses(txns, overrides = {}) {
     let freq = 'mensual', perMonth = last.amount;
     if (med && med >= 12 && med <= 16) { freq = 'cada 2 semanas'; perMonth = last.amount * 26 / 12; }
     else if (med && med >= 6 && med <= 8) { freq = 'semanal'; perMonth = last.amount * 52 / 12; }
-    out.push({ key: [...g.keys][0], keys: [...g.keys], name: last.desc, cat: last.cat, amount: last.amount, freq, perMonth, day: Number(last.date.slice(8)), lastDate: last.date, account: last.account, dates: g.items.map((t) => t.date) });
+    out.push({ key: [...g.keys][0], keys: [...g.keys], brand: g.brand, amounts: g.items.map((t) => t.amount), name: last.desc, cat: last.cat, amount: last.amount, freq, perMonth, day: Number(last.date.slice(8)), lastDate: last.date, account: last.account, dates: g.items.map((t) => t.date) });
   }
   return out.sort((a, b) => b.perMonth - a.perMonth);
 }
@@ -185,12 +185,15 @@ export function monthlyPicture(txns, fixed) {
   }
   const byKey = new Map();
   for (const t of pay) { const k = merchantKey(t.desc); if (!byKey.has(k)) byKey.set(k, []); byKey.get(k).push(t); }
-  let income = 0, incomeNote = '';
+  let income = 0, incomeNote = '', payInfo = null;
   for (const [, list] of byKey) {
     list.sort((a, b) => a.date.localeCompare(b.date));
     const gaps = list.slice(1).map((t, i) => daysBetween(list[i].date, t.date));
     const avg = -list.reduce((s, t) => s + t.amount, 0) / list.length;
-    if (gaps.length && gaps.every((g) => g >= 12 && g <= 16)) { income += avg * 26 / 12; incomeNote = `sueldo cada 2 semanas de ~${Math.round(avg)}`; }
+    if (gaps.length && gaps.every((g) => g >= 12 && g <= 16)) {
+      income += avg * 26 / 12; incomeNote = `sueldo cada 2 semanas de ~${Math.round(avg)}`;
+      if (!payInfo || avg > payInfo.amount) payInfo = { last: list[list.length - 1].date, amount: avg, every: 14, account: list[0].account };
+    } else if (!payInfo && list.length) payInfo = { last: list[list.length - 1].date, amount: avg, every: null, account: list[0].account };
     else income += -win.filter((t) => list.includes(t)).reduce((s, t) => s + t.amount, 0);
   }
   if (!income) income = -win.filter((t) => CAT[t.cat]?.kind === 'ingreso' && t.cat !== 'reembolsos').reduce((s, t) => s + t.amount, 0);
@@ -207,10 +210,11 @@ export function monthlyPicture(txns, fixed) {
     if (t.cat === 'intereses') { interest += t.amount; continue; }
     if (t.cat === 'reembolsos') continue;
     if (fixedKeys.has(merchantKey(t.desc))) continue;
+    if (t.oneOff) continue; // gastos de una sola vez no cuentan en el mes típico
     variable += t.amount;
     varByCat[t.cat] = (varByCat[t.cat] || 0) + t.amount;
   }
-  return { start, end, income, incomeNote, variable, interest, invest, varByCat };
+  return { start, end, income, incomeNote, payInfo, variable, interest, invest, varByCat };
 }
 
 // ---------- plan para salir de deudas ----------
@@ -220,6 +224,7 @@ export function simulate(debts, monthlyPay, strategy = 'avalancha') {
   if (!ds.length) return { months: 0, totalInterest: 0, order: [], feasible: true };
   const order = [...ds].sort((a, b) => strategy === 'bolaDeNieve' ? a.bal - b.bal : (b.apr ?? 0) - (a.apr ?? 0) || a.bal - b.bal);
   let month = 0, totalInterest = 0;
+  const trace = [ds.reduce((s, d) => s + d.bal, 0)];
   while (ds.some((d) => d.bal > 0.5) && month < 600) {
     month++;
     for (const d of ds) if (d.bal > 0) { const i = d.bal * ((d.apr ?? 0) / 100 / 12); d.bal += i; d.interestPaid += i; totalInterest += i; }
@@ -232,9 +237,10 @@ export function simulate(debts, monthlyPay, strategy = 'avalancha') {
       if (d.bal > 0) { const p = Math.min(d.bal, budget); d.bal -= p; budget -= p; }
     }
     for (const d of ds) if (d.bal <= 0.5 && d.paidOffMonth == null) { d.bal = 0; d.paidOffMonth = month; }
+    trace.push(ds.reduce((s, d) => s + Math.max(0, d.bal), 0));
   }
   if (month >= 600) return { months: Infinity, totalInterest: Infinity, order, feasible: false };
-  return { months: month, totalInterest, order: order.map((o) => ds.find((d) => d.id === o.id)), feasible: true };
+  return { months: month, totalInterest, trace, order: order.map((o) => ds.find((d) => d.id === o.id)), feasible: true };
 }
 
 // Solo pagando el mínimo (3% del saldo, mínimo $10) cada mes
@@ -281,4 +287,85 @@ export function buildICS(cards) {
   }
   lines.push('END:VCALENDAR');
   return lines.join('\r\n');
+}
+
+
+// ---------- tengo $X para pagar: ¿a dónde va? ----------
+
+// 1) Primero, el saldo del estado de las tarjetas que hoy NO cobran intereses y vencen pronto
+//    (si no se paga completo, empiezan a cobrar intereses sobre todo).
+// 2) Después, de la tasa más alta a la más baja.
+export function allocateLump(amount, cards) {
+  let left = amount;
+  const rows = [];
+  const add = (c, amt, why, saved) => {
+    const r = rows.find((x) => x.id === c.id);
+    if (r) { r.amount += amt; r.saved += saved; } else rows.push({ id: c.id, name: c.name, amount: amt, why, saved });
+  };
+  const graceCards = cards.filter((c) => c.status === 'usar' && c.statementBalance > 0 && c.daysToDue != null && c.daysToDue <= 35)
+    .sort((a, b) => a.daysToDue - b.daysToDue);
+  for (const c of graceCards) {
+    if (left <= 0) break;
+    const amt = Math.min(left, c.statementBalance);
+    // Si no se paga completo, se cobra interés sobre todo el saldo por al menos un mes
+    const saved = amt >= c.statementBalance - 0.01 ? (c.balance || c.statementBalance) * ((c.apr || 20) / 100 / 12) : 0;
+    add(c, amt, `Pagar el estado completo antes del ${c.dueDate} evita que empiece a cobrar intereses.`, saved);
+    left -= amt;
+  }
+  const rest = cards.filter((c) => c.balance > 0 && c.kind !== 'prestamo').map((c) => ({ ...c, rem: c.balance - (rows.find((r) => r.id === c.id)?.amount || 0) }))
+    .filter((c) => c.rem > 0.5).sort((a, b) => (b.apr ?? 0) - (a.apr ?? 0));
+  for (const c of rest) {
+    if (left <= 0) break;
+    const amt = Math.min(left, c.rem);
+    add(c, amt, `Es la más cara que queda (${c.apr ?? '?'}% al año).`, amt * ((c.apr ?? 0) / 100));
+    left -= amt;
+  }
+  return { rows, left };
+}
+
+// ---------- proyección de efectivo ----------
+
+export function cashProjection({ start, startDate, paydays, payAmount, fixed, cardPayments, days = 35 }) {
+  const events = [];
+  const end = shiftISO(startDate, days);
+  for (const d of paydays) if (d > startDate && d <= end) events.push({ date: d, label: 'Sueldo', amount: payAmount });
+  for (const f of fixed) {
+    // próxima fecha esperada de cada gasto fijo
+    let d = f.next;
+    while (d && d <= end) {
+      if (d > startDate) events.push({ date: d, label: f.name, amount: -f.amount });
+      d = f.everyDays ? shiftISO(d, f.everyDays) : addMonthsISO(d, 1, f.day);
+    }
+  }
+  for (const c of cardPayments) if (c.date > startDate && c.date <= end) events.push({ date: c.date, label: `Pago ${c.name}`, amount: -c.amount });
+  events.sort((a, b) => a.date.localeCompare(b.date) || b.amount - a.amount);
+  let bal = start, low = { bal: start, date: startDate };
+  for (const e of events) { bal += e.amount; e.bal = bal; if (bal < low.bal) low = { bal, date: e.date }; }
+  return { events, low, endBal: bal };
+}
+
+export function nextOccurrence(f, today) {
+  if (f.freq === 'cada 2 semanas' || f.freq === 'semanal') {
+    const step = f.freq === 'semanal' ? 7 : 14;
+    let d = f.lastDate;
+    while (d <= today) d = shiftISO(d, step);
+    return { next: d, everyDays: step };
+  }
+  let d = addMonthsISO(today, 0, f.day);
+  if (d <= today || f.lastDate.slice(0, 7) === today.slice(0, 7)) d = addMonthsISO(today, 1, f.day);
+  return { next: d, everyDays: null };
+}
+
+// ---------- suscripciones ----------
+
+export function reviewSubscriptions(fixed) {
+  const subs = fixed.filter((f) => f.cat === 'suscripciones');
+  const out = subs.map((f) => ({ ...f, flags: [] }));
+  for (const s of out) {
+    const amts = s.amounts || [];
+    if (amts.length >= 2 && amts[amts.length - 1] > amts[amts.length - 2] * 1.03) s.flags.push(`subió de ${amts[amts.length - 2].toFixed(2)} a ${amts[amts.length - 1].toFixed(2)}`);
+    const twins = out.filter((o) => o !== s && o.brand === s.brand && o.account !== s.account);
+    if (twins.length) s.flags.push('aparece en más de una cuenta: ¿la pagas dos veces?');
+  }
+  return { subs: out, monthly: subs.reduce((t, f) => t + f.perMonth, 0) };
 }

@@ -1,8 +1,8 @@
 // Guarda la app para que abra sin internet. Tus datos no pasan por aquí.
-const VERSION = 'finanzas-v2';
+const VERSION = 'finanzas-v3';
 const SHELL = [
   './', 'index.html', 'styles.css', 'manifest.webmanifest',
-  'js/app.js', 'js/db.js', 'js/parsers.js', 'js/categories.js', 'js/debts.js',
+  'js/app.js', 'js/db.js', 'js/parsers.js', 'js/categories.js', 'js/debts.js', 'js/gdrive.js',
   'vendor/xlsx.mini.min.js', 'vendor/pdf.min.mjs', 'vendor/pdf.worker.min.mjs',
   'icons/icon-192.png', 'icons/apple-touch-icon.png',
 ];
