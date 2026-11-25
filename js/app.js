@@ -191,7 +191,7 @@ function renderResumen() {
   const isLatest = state.month === latestMonth();
   const budgets = state.settings.budgets || {};
   const trend = categoryTrends();
-  el.innerHTML = `${isLatest ? backupBanner() + staleBanner() + upcomingBanner() + budgetBanner() : ''}
+  el.innerHTML = `${isLatest ? backupBanner() + staleBanner() + weeklyBanner() + upcomingBanner() + budgetBanner() : ''}
     <div class="kpis">
       <div class="kpi big"><div class="label">Gastaste en ${esc(MESES[Number(state.month.slice(5)) - 1])}</div><div class="value">${money(s.gasto)}</div></div>
       <div class="kpi"><div class="label">Ingresos</div><div class="value pos">${money(s.ingreso)}</div></div>
@@ -644,6 +644,9 @@ function concreteActions(m) {
   for (const [cat, spent, budget] of budgetStatus().filter((b) => b[1] >= b[2] * 0.8)) {
     acts.push({ html: `<b>${esc(CAT[cat].name)}: llevas ${money(spent)} de ${money(budget)}</b> este mes. ${spent >= budget ? 'Ya te pasaste: frena hasta el próximo mes.' : `Te quedan ${money(budget - spent)}.`}` });
   }
+  for (const w of weekStatus().filter((x) => x.spent >= x.limit * 0.8)) {
+    acts.push({ html: `<b>${esc(w.name)}: esta semana llevas ${money(w.spent)} de ${money(w.limit)}.</b> ${w.spent >= w.limit ? 'Ya te pasaste: cocina en casa hasta el lunes.' : `Te quedan ${money(w.limit - w.spent)} hasta el domingo.`}` });
+  }
   const stale = staleAccounts();
   if (stale.length) acts.push({ html: `<b>Actualiza tus datos:</b> ${stale.map((s) => `${esc(shortAcct(s.id))} (${s.days} días)`).join(', ')}. Mientras más al día, mejores consejos.` });
   return acts;
@@ -651,7 +654,7 @@ function concreteActions(m) {
 
 function shiftDateISO(iso, d) { const x = new Date(iso + 'T12:00:00Z'); x.setUTCDate(x.getUTCDate() + d); return x.toISOString().slice(0, 10); }
 const isDebit = (id) => state.accounts.find((a) => a.id === id)?.kind === 'debito';
-const shortFixed = (n) => String(n).replace(/\s+\d[\d\s]*$/, '').replace(/\s+(ltd|inc\.?|holdings)\b.*$/i, '').slice(0, 34);
+const shortFixed = (n) => String(n).replace(/^\d+[.,]\d+\s+/, '').replace(/\s\+\d+/g, '').replace(/\s+\d[\d\s]*$/, '').replace(/\s+(ltd|inc\.?|holdings)\b.*$/i, '').slice(0, 34);
 
 function staleAccounts() {
   const today = todayISO();
@@ -687,6 +690,8 @@ function renderAsesoria() {
   el.innerHTML = `
     ${missing.length ? `<div class="alert warn" data-action="goto" data-view="deudas">Faltan datos reales de: ${esc([...new Set(missing)].join(', '))}. Los consejos usan estimaciones hasta que los escribas en <b>Deudas</b>.</div>` : ''}
     <div class="card hl"><h2>Qué hacer ahora</h2><ul class="steps acts">${acts.map((a) => `<li>${a.html}</li>`).join('')}</ul></div>
+    ${leaksCard(m)}
+    ${weeklyCard()}
     ${lumpCard(cards)}
     <div class="card"><h2>Tu mes típico</h2>
       <div class="grid2 big">
@@ -1090,6 +1095,99 @@ function categoryTrends() {
   return out;
 }
 
+// ---------- fugas de dinero ----------
+
+function leaks(m) {
+  const end = m.pic.end, start = m.pic.start;
+  const win = state.txns.filter((t) => t.date > start && t.date <= end && t.amount > 0);
+  const sumBy = (fn) => win.filter(fn).reduce((s, t) => s + t.amount, 0);
+  const out = [];
+  const protection = sumBy((t) => /credit card protec|balance protection|payment protection|card protection/i.test(t.raw || t.desc));
+  if (protection > 5) out.push({ save: protection, icon: '🛡️', html: `<b>Seguro de protección de tarjeta: ${money(protection)} al mes.</b> Es un seguro opcional que el banco cobra sobre tu saldo. Llama y cancélalo.` });
+  const fees = sumBy((t) => t.cat === 'intereses' && /monthly fee|service charge|odp|overdraft|annual fee|late fee|nsf/i.test(t.raw || t.desc));
+  if (fees > 3) out.push({ save: fees, icon: '🏦', html: `<b>Comisiones del banco: ${money(fees)} al mes.</b> Pregunta qué saldo mínimo evita la cuota mensual, o cambia a una cuenta sin comisión.` });
+  const eat = sumBy((t) => t.cat === 'resto' || t.cat === 'delivery');
+  const eatGoal = (state.settings.weekly?.eatout ?? 60) * 52 / 12;
+  if (eat > eatGoal + 20) out.push({ save: eat - eatGoal, icon: '🍔', html: `<b>Comida fuera y a domicilio: ${money(eat)} al mes.</b> Con un límite de ${money(state.settings.weekly?.eatout ?? 60)} por semana gastarías ${money(eatGoal)}.` });
+  if (m.extraInv) out.push({ save: m.extraInv, icon: '📈', html: `<b>Inversión mientras pagas ${pct(m.maxApr)} de interés: ${money(m.extraInv)} al mes.</b> Pausarla hasta pagar las tarjetas rinde más que cualquier inversión.` });
+  const { subs } = reviewSubscriptions(m.fixed);
+  const dup = subs.filter((s) => s.flags.some((f) => f.includes('dos veces')));
+  if (dup.length) { const c = Math.min(...dup.map((d) => d.perMonth)); out.push({ save: c, icon: '🔁', html: `<b>Suscripción repetida: ${esc(shortFixed(dup[0].name))}</b> aparece en ${dup.length} cuentas. Si es la misma, cancela una.` }); }
+  const phones = m.fixed.filter((f) => f.cat === 'servicios' && /telus|koodo|rogers|fido|bell|freedom|virgin|chatr|public mobile|fizz/i.test(f.name));
+  if (phones.length >= 2) { const c = Math.min(...phones.map((p) => p.perMonth)); out.push({ save: c, icon: '📱', html: `<b>${phones.length} planes de celular</b> (${phones.map((p) => `${esc(shortFixed(p.name).split(' ')[0])} ${money(p.perMonth)}`).join(', ')}). Si alguno es tuyo y no lo usas, cancélalo o junta las líneas.` }); }
+  const alc = sumBy((t) => t.cat === 'alcohol');
+  if (alc > 60) out.push({ save: alc / 2, icon: '🍷', html: `<b>Licor: ${money(alc)} al mes.</b> A la mitad son ${money(alc / 2)} más para tus deudas.` });
+  const housing = m.fixed.filter((f) => f.cat === 'vivienda' || f.cat === 'prestamos').reduce((s, f) => s + f.perMonth, 0);
+  const ratio = m.income ? housing / m.income : 0;
+  const notes = [];
+  if (ratio > 0.5) notes.push({ icon: '🏠', html: `<b>Renta y préstamo se llevan el ${Math.round(ratio * 100)}% de tu sueldo</b> (${money(housing)} de ${money(m.income)}). Lo sano es menos del 40%. No es para hoy, pero al renovar contrato vale la pena buscar algo más barato o un roomie.` });
+  out.sort((a, b) => b.save - a.save);
+  return { items: out, total: out.reduce((s, x) => s + x.save, 0), notes };
+}
+
+function leaksCard(m) {
+  const { items, total, notes } = leaks(m);
+  if (!items.length && !notes.length) return '';
+  return `<div class="card leaks"><h2>Fugas de dinero · puedes recuperar ~${money(total)} al mes</h2>
+    ${items.map((x) => `<div class="frow"><div class="ic">${x.icon}</div><div class="small">${x.html}</div><div class="amt pos">+${money(x.save)}<div class="small muted">al mes</div></div></div>`).join('')}
+    ${notes.map((x) => `<div class="frow"><div class="ic">${x.icon}</div><div class="small">${x.html}</div><div></div></div>`).join('')}
+    <p class="small muted">Calculado con tus últimos 30 días.</p></div>`;
+}
+
+// ---------- límites semanales ----------
+
+const WEEKLY = [
+  { id: 'eatout', name: 'Comida fuera y a domicilio', icon: '🍔', cats: ['resto', 'delivery'], def: 60 },
+  { id: 'compras', name: 'Compras y ropa', icon: '🛍️', cats: ['compras'], def: 50 },
+  { id: 'alcohol', name: 'Licor', icon: '🍷', cats: ['alcohol'], def: 25 },
+];
+
+function weekStatus() {
+  const lim = state.settings.weekly || {};
+  const ref = state.txns.map((t) => t.date).sort().pop() || todayISO();
+  const d = new Date(ref + 'T12:00:00Z');
+  const monday = shiftDateISO(ref, -((d.getUTCDay() + 6) % 7));
+  return WEEKLY.map((w) => {
+    const limit = lim[w.id] ?? (w.id === 'eatout' ? w.def : null);
+    if (!limit) return null;
+    const spent = state.txns.filter((t) => t.date >= monday && t.date <= ref && w.cats.includes(t.cat) && t.amount > 0).reduce((s, t) => s + t.amount, 0);
+    return { ...w, limit, spent, monday, ref };
+  }).filter(Boolean);
+}
+
+function weeklyBanner() {
+  const st = weekStatus().filter((w) => w.spent >= w.limit * 0.8);
+  if (!st.length) return '';
+  return `<div class="alert ${st.some((w) => w.spent >= w.limit) ? '' : 'warn'}" data-action="weekly"><b>⏱️ Esta semana</b> <span class="small muted">(desde el ${fmtDate(st[0].monday)})</span>
+    ${st.map((w) => `<div class="small">${w.icon} ${esc(w.name)}: <b>${money(w.spent)}</b> de ${money(w.limit)}${w.spent >= w.limit ? ` · <b>te pasaste por ${money(w.spent - w.limit)}</b>` : ` · te quedan ${money(w.limit - w.spent)}`}</div>`).join('')}</div>`;
+}
+
+function weeklyCard() {
+  const st = weekStatus();
+  return `<div class="card"><div class="dhead"><h2>Límites de esta semana</h2><button class="chip" data-action="weekly">Cambiar</button></div>
+    ${st.map((w) => { const p = Math.min(1, w.spent / w.limit); return `<div class="goal"><div class="dhead"><span>${w.icon} ${esc(w.name)}</span><span class="small"><b>${money(w.spent)}</b> de ${money(w.limit)}</span></div><div class="ubar"><i class="${p >= 1 ? 'bad' : p >= 0.8 ? 'mid' : 'ok'}" style="width:${Math.max(p * 100, 2)}%"></i></div></div>`; }).join('') || '<p class="small muted">Sin límites. Toca Cambiar.</p>'}
+    <p class="small muted">La semana va de lunes a domingo y se cuenta con lo último que importaste. Importa seguido (el aviso del Calendario te ayuda) para que la alerta llegue a tiempo.</p></div>`;
+}
+
+function openWeekly() {
+  const lim = state.settings.weekly || {};
+  $('#sheetPanel').innerHTML = `<h3>Límites por semana</h3>
+    <p class="small muted">Te aviso al llegar al 80% y cuando te pases. Deja vacío para no limitar.</p>
+    ${WEEKLY.map((w) => `<label class="field inline2"><span>${w.icon} ${esc(w.name)}<small class="muted">sugerido: ${money(w.def)}</small></span><input type="number" inputmode="decimal" data-weekly="${w.id}" value="${lim[w.id] ?? (w.id === 'eatout' && lim.eatout === undefined ? w.def : '')}" placeholder="—"></label>`).join('')}
+    <button class="btn" data-action="saveweekly">Guardar</button>
+    <button class="btn secondary" data-close>Cancelar</button>`;
+  $('#sheet').classList.remove('hidden');
+}
+
+async function saveWeekly() {
+  const w = {};
+  document.querySelectorAll('[data-weekly]').forEach((i) => { w[i.dataset.weekly] = i.value === '' ? 0 : Number(i.value) || 0; });
+  state.settings.weekly = w;
+  await saveSettings();
+  closeSheet(); render();
+  toast('Límites guardados');
+}
+
 // ---------- utilidades de UI ----------
 
 let toastTimer;
@@ -1144,6 +1242,8 @@ document.addEventListener('click', (e) => {
   if (act === 'drivebackup') driveBackup(false);
   if (act === 'driverestore') driveRestore();
   if (act === 'saveclient') saveClientId();
+  if (act === 'weekly') openWeekly();
+  if (act === 'saveweekly') saveWeekly();
   if (act) return;
   const cat = e.target.closest('[data-cat]');
   if (cat) { state.filterCat = cat.dataset.cat; state.view = 'movs'; render(); window.scrollTo(0, 0); return; }
