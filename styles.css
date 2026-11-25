@@ -45,7 +45,7 @@ button { font: inherit; color: inherit; }
   backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--line);
 }
-.top h1 { font-size: 18px; margin: 0; text-transform: capitalize; }
+.top h1 { font-size: 18px; margin: 0; }
 .icon-btn { background: none; border: 0; font-size: 28px; width: 44px; height: 44px; border-radius: 12px; color: var(--accent); }
 .icon-btn:disabled { opacity: .25; }
 
@@ -147,3 +147,50 @@ main { max-width: 640px; margin: 0 auto; padding: 12px 16px; }
 
 .toast { position: fixed; left: 16px; right: 16px; bottom: calc(var(--safe-b) + 84px); z-index: 40; background: var(--text); color: var(--bg); padding: 12px 16px; border-radius: 12px; text-align: center; max-width: 480px; margin: 0 auto; }
 .toast.hidden { display: none; }
+
+/* ---- deudas y asesoría ---- */
+.tabs button { font-size: 11px; }
+.alert.warn { background: color-mix(in srgb, #f59f00 14%, var(--card)); border-color: color-mix(in srgb, #f59f00 45%, transparent); cursor: pointer; }
+.alert.warn .small { margin-top: 4px; }
+.card.hl { border: 2px solid var(--accent); }
+.est { color: #e67700; font-weight: 700; margin-left: 1px; }
+.badge { font-size: 13px; font-weight: 600; padding: 4px 10px; border-radius: 999px; white-space: nowrap; }
+.badge.ok { background: #d3f9d8; color: #2b8a3e; }
+.badge.mid { background: #fff3bf; color: #8a6100; }
+.badge.bad { background: #ffe3e3; color: #c92a2a; }
+@media (prefers-color-scheme: dark) {
+  .badge.ok { background: #1c3a24; color: #8ce99a; }
+  .badge.mid { background: #3d3418; color: #ffd43b; }
+  .badge.bad { background: #3f1d1d; color: #ffa8a8; }
+}
+.dhead { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 4px; }
+.dhead .n { font-weight: 700; }
+.ubar { height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; margin: 8px 0 2px; }
+.ubar i { display: block; height: 100%; border-radius: 4px; }
+.ubar i.ok { background: #37b24d; } .ubar i.mid { background: #f59f00; } .ubar i.bad { background: var(--danger); }
+.grid2 { display: grid; grid-template-columns: 1fr auto; gap: 6px 12px; margin: 10px 0; align-items: baseline; }
+.grid2 .r { text-align: right; font-variant-numeric: tabular-nums; }
+.grid2.big { font-size: 16px; }
+.grid2 .tot { font-weight: 700; border-top: 1px solid var(--line); padding-top: 8px; }
+.btn.sm { padding: 10px; font-size: 15px; }
+.due { display: grid; grid-template-columns: 76px 1fr; gap: 10px; padding: 10px 0; border-top: 1px solid var(--line); align-items: center; }
+.due:first-of-type { border-top: 0; }
+.due .when { text-align: center; background: var(--bg); border-radius: 10px; padding: 6px 4px; }
+.due.urgent .when { background: var(--danger-soft); color: var(--danger); }
+.due .n { font-weight: 600; }
+.frow { display: grid; grid-template-columns: 32px 1fr auto; gap: 10px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
+.frow:first-of-type { border-top: 0; }
+.frow .ic { font-size: 20px; text-align: center; }
+.frow .amt { text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
+.field { display: block; margin: 10px 0; }
+.field span { display: block; font-size: 14px; color: var(--muted); margin-bottom: 4px; }
+.field input { width: 100%; padding: 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--bg); color: var(--text); font: inherit; font-size: 16px; }
+.field.inline { display: grid; grid-template-columns: 1fr 64px; gap: 8px; align-items: end; }
+.field.inline span { grid-column: 1 / -1; }
+.steps { padding-left: 20px; margin: 0; }
+.steps li { margin: 0 0 12px; }
+.order { padding-left: 20px; }
+.order li { margin-bottom: 8px; }
+.seg { display: flex; background: var(--bg); border-radius: 12px; padding: 3px; margin-bottom: 12px; }
+.seg button { flex: 1; border: 0; background: none; padding: 8px; border-radius: 10px; font-size: 14px; color: var(--muted); }
+.seg button.sel { background: var(--card); color: var(--text); font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,.12); }

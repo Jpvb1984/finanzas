@@ -1,6 +1,7 @@
 import * as db from './db.js';
 import { parseWorkbook, parseCSV, parsePDF, pdfToLines, assignIds } from './parsers.js';
 import { CATEGORIES, CAT, categorize, merchantKey } from './categories.js';
+import { cardInfo, fixedExpenses, monthlyPicture, simulate, minimumsOnly, buildICS, isDebtAccount, todayISO, daysBetween } from './debts.js';
 
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -9,7 +10,7 @@ const money = (n, sign = false) => {
   return (n < 0 ? '−' : sign && n > 0 ? '+' : '') + s;
 };
 const MESES = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
-const monthName = (ym) => `${MESES[Number(ym.slice(5, 7)) - 1]} ${ym.slice(0, 4)}`;
+const monthName = (ym) => { const m = MESES[Number(ym.slice(5, 7)) - 1]; return `${m[0].toUpperCase()}${m.slice(1)} ${ym.slice(0, 4)}`; };
 const dayName = (iso) => new Date(iso + 'T12:00:00').toLocaleDateString('es', { weekday: 'long', day: 'numeric', month: 'long' });
 
 const state = {
@@ -22,6 +23,8 @@ const state = {
   filterAcct: '',
   search: '',
   lastResults: [],
+  fixedOv: {},
+  settings: {},
 };
 
 // ---------- carga ----------
@@ -29,6 +32,8 @@ const state = {
 async function load() {
   [state.txns, state.accounts, state.rules] = await Promise.all([db.getAll('txns'), db.getAll('accounts'), db.kvGet('rules')]);
   state.rules = state.rules || {};
+  state.fixedOv = (await db.kvGet('fixed')) || {};
+  state.settings = (await db.kvGet('settings')) || {};
   const months = monthsWithData();
   if (!state.month || !months.includes(state.month)) state.month = months[months.length - 1] || new Date().toISOString().slice(0, 7);
 }
@@ -97,7 +102,11 @@ async function importFiles(files) {
       if (m.statementBalance != null) acct.statementBalance = m.statementBalance;
       if (m.minPayment != null) acct.minPayment = m.minPayment;
       if (m.periodEnd && (!acct.statementEnd || m.periodEnd > acct.statementEnd)) acct.statementEnd = m.periodEnd;
-      if (m.balance != null) acct.balance = m.balance;
+      if (m.balance != null) { acct.balance = m.balance; acct.balanceAt = new Date().toISOString(); }
+      if (m.limit != null) acct.limit = m.limit;
+      if (m.limitApprox != null) acct.limitApprox = m.limitApprox;
+      if (m.apr != null) acct.apr = m.apr;
+      if (/line of credit|scotialine/i.test(acct.name)) acct.kind = 'linea';
       acct.name = acct.name || r.account.name;
       acct.lastImport = new Date().toISOString();
       await db.putMany('accounts', [acct]);
@@ -144,17 +153,21 @@ function summary(txns) {
 
 // ---------- vistas ----------
 
+const TITLES = { cuentas: 'Cuentas', deudas: 'Deudas y pagos', asesoria: 'Asesoría' };
 function render() {
   const months = monthsWithData();
-  $('#monthLabel').textContent = state.view === 'cuentas' ? 'Cuentas' : monthName(state.month);
-  $('#prevMonth').disabled = state.view === 'cuentas' || !months.length || state.month <= months[0];
-  $('#nextMonth').disabled = state.view === 'cuentas' || !months.length || state.month >= months[months.length - 1];
-  $('#prevMonth').style.visibility = $('#nextMonth').style.visibility = state.view === 'cuentas' ? 'hidden' : 'visible';
+  const noMonth = Boolean(TITLES[state.view]);
+  $('#monthLabel').textContent = noMonth ? TITLES[state.view] : monthName(state.month);
+  $('#prevMonth').disabled = noMonth || !months.length || state.month <= months[0];
+  $('#nextMonth').disabled = noMonth || !months.length || state.month >= months[months.length - 1];
+  $('#prevMonth').style.visibility = $('#nextMonth').style.visibility = noMonth ? 'hidden' : 'visible';
   document.querySelectorAll('.tabs button').forEach((b) => b.classList.toggle('active', b.dataset.view === state.view));
   document.querySelectorAll('.view').forEach((v) => v.classList.toggle('active', v.id === `view-${state.view}`));
   if (state.view === 'resumen') renderResumen();
   if (state.view === 'movs') renderMovs();
   if (state.view === 'cuentas') renderCuentas();
+  if (state.view === 'deudas') renderDeudas();
+  if (state.view === 'asesoria') renderAsesoria();
 }
 
 function emptyState() {
@@ -169,7 +182,7 @@ function renderResumen() {
   const s = summary(monthTxns());
   const net = s.ingreso - s.gasto;
   const accts = [...new Set(monthTxns().map((t) => t.account))].map(shortAcct);
-  el.innerHTML = `
+  el.innerHTML = `${upcomingBanner()}
     <div class="kpis">
       <div class="kpi big"><div class="label">Gastaste en ${esc(MESES[Number(state.month.slice(5)) - 1])}</div><div class="value">${money(s.gasto)}</div></div>
       <div class="kpi"><div class="label">Ingresos</div><div class="value pos">${money(s.ingreso)}</div></div>
@@ -190,6 +203,7 @@ function renderResumen() {
         </div>`;
       }).join('') || '<p class="muted">Sin gastos este mes.</p>'}
     </div>
+    ${fixedCard()}
     <p class="muted small">Incluye: ${esc(accts.join(', ')) || '—'}. Los pagos a tus tarjetas, transferencias e inversiones no cuentan como gasto.</p>`;
 }
 
@@ -285,6 +299,7 @@ function openTxn(id) {
     <div class="muted small">${esc(dayName(t.date))} · ${esc(acctName(t.account))} · <b style="white-space:nowrap">${money(-t.amount, true)}</b></div>
     <div class="catgrid">${CATEGORIES.map((c) => `<button data-setcat="${c.id}" class="${c.id === t.cat ? 'sel' : ''}"><span>${c.icon}</span>${esc(c.name)}</button>`).join('')}</div>
     <label class="check"><input type="checkbox" id="remember" checked> Usar esta categoría siempre para «${esc(key)}»${same > 1 ? ` (${same} movimientos)` : ''}</label>
+    ${t.amount > 0 ? `<label class="check"><input type="checkbox" id="isFixed" data-key="${esc(key)}" ${isFixedKey(key) ? 'checked' : ''}> Es un gasto fijo (se repite cada mes)</label>` : ''}
     <button class="btn secondary" data-close>Cerrar</button>`;
   $('#sheetPanel').dataset.id = id;
   $('#sheet').classList.remove('hidden');
@@ -312,7 +327,7 @@ function closeSheet() { $('#sheet').classList.add('hidden'); }
 // ---------- respaldo manual ----------
 
 async function backup() {
-  const data = { app: 'finanzas', version: 1, exportedAt: new Date().toISOString(), txns: state.txns, accounts: state.accounts, rules: state.rules };
+  const data = { app: 'finanzas', version: 1, exportedAt: new Date().toISOString(), txns: state.txns, accounts: state.accounts, rules: state.rules, fixed: state.fixedOv, settings: state.settings };
   const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
   const name = `finanzas-respaldo-${new Date().toISOString().slice(0, 10)}.json`;
   const file = new File([blob], name, { type: 'application/json' });
@@ -333,6 +348,8 @@ async function restore(file) {
     await db.putMany('txns', data.txns);
     await db.putMany('accounts', data.accounts || []);
     await db.kvSet('rules', { ...(state.rules || {}), ...(data.rules || {}) });
+    if (data.fixed) await db.kvSet('fixed', { ...state.fixedOv, ...data.fixed });
+    if (data.settings) await db.kvSet('settings', { ...state.settings, ...data.settings });
     await load();
     render();
     toast(`Copia restaurada: ${data.txns.length} movimientos`);
@@ -348,6 +365,272 @@ async function wipe() {
   await load();
   render();
   toast('Datos borrados');
+}
+
+// ---------- deudas ----------
+
+const fmtDate = (iso, opts = { day: 'numeric', month: 'short' }) => new Date(iso + 'T12:00:00').toLocaleDateString('es', opts);
+const inDays = (n) => (n === 0 ? 'hoy' : n === 1 ? 'mañana' : `en ${n} días`);
+const est = (src) => (src && !['estado', 'archivo', 'tuyo', 'estado + movimientos'].includes(src) ? `<span class="est" title="${esc(src)}">*</span>` : '');
+const pct = (n) => `${(Math.round(n * 100) / 100).toLocaleString('es')}%`;
+
+function isFixedKey(key) {
+  return fixedList().some((f) => (f.keys || [f.key]).includes(key));
+}
+function fixedList() { return fixedExpenses(state.txns, state.fixedOv); }
+function allCards() {
+  const today = todayISO();
+  return state.accounts.filter(isDebtAccount).map((a) => cardInfo(a, state.txns, today));
+}
+
+function upcomingBanner() {
+  const soon = allCards().filter((c) => c.daysToDue != null && c.daysToDue <= 10 && (c.balance ?? 1) > 0).sort((a, b) => a.daysToDue - b.daysToDue);
+  if (!soon.length) return '';
+  return `<div class="alert warn" data-action="goto" data-view="deudas"><b>📅 Pagos próximos</b>
+    ${soon.map((c) => `<div class="small">${esc(shortCard(c.name))}: <b>${inDays(c.daysToDue)}</b> (${fmtDate(c.dueDate)})${c.minPayment ? ` · mínimo ${money(c.minPayment)}${est(c.minSrc)}` : ''}</div>`).join('')}
+  </div>`;
+}
+const shortCard = (n) => String(n).replace(/Scotia(bank)? |American Express |Visa Infinite |Line of Credit /g, '').replace(/\s+/g, ' ').trim();
+
+function fixedCard() {
+  const list = fixedList();
+  if (!list.length) return '';
+  const total = list.reduce((s, f) => s + f.perMonth, 0);
+  const rows = list.map((f) => {
+    const paid = f.dates.filter((d) => d.startsWith(state.month)).length;
+    const status = paid ? `<span class="pos">✓ pagado${paid > 1 ? ` ×${paid}` : ''}</span>` : `<span class="muted">pendiente · ~día ${f.day}</span>`;
+    return `<div class="frow"><div class="ic">${CAT[f.cat]?.icon || '📌'}</div><div><div>${esc(f.name)}</div><div class="small">${status} · ${esc(f.freq)}</div></div><div class="amt">${money(f.perMonth)}<div class="small muted">al mes</div></div></div>`;
+  }).join('');
+  return `<div class="card"><h2>Gastos fijos · ${money(total)} al mes</h2>${rows}
+    <p class="small muted">Se detectan solos (renta, préstamos, seguros, teléfono, suscripciones). Toca cualquier movimiento para marcarlo o desmarcarlo como fijo.</p></div>`;
+}
+
+const STATUS = {
+  usar: ['🟢', 'Úsala', 'ok'],
+  cuidado: ['🟡', 'Con cuidado', 'mid'],
+  quieta: ['🔴', 'Déjala quieta', 'bad'],
+  prestamo: ['🏦', 'Préstamo', 'mid'],
+};
+
+function renderDeudas() {
+  const el = $('#view-deudas');
+  const cards = allCards();
+  if (!cards.length) { el.innerHTML = emptyState(); return; }
+  const withBal = cards.filter((c) => c.balance > 0);
+  const total = withBal.reduce((s, c) => s + c.balance, 0);
+  const interest = withBal.reduce((s, c) => s + (c.monthlyInterest || 0), 0);
+  const mins = cards.filter((c) => c.minPayment).reduce((s, c) => s + c.minPayment, 0);
+  const anyEst = cards.some((c) => ['estimado'].includes(c.balanceSrc) || c.aprSrc === 'típica' || c.dueSrc === 'estimada' || c.balance == null || c.apr == null);
+  const usable = cards.filter((c) => c.status === 'usar').sort((a, b) => (b.graceIfBuyToday || 0) - (a.graceIfBuyToday || 0));
+  const upcoming = cards.filter((c) => c.dueDate && c.kind !== 'prestamo').sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+
+  const loanFixed = fixedList().filter((f) => f.cat === 'prestamos');
+  const hasLoan = cards.some((c) => c.kind === 'prestamo');
+
+  el.innerHTML = `
+    <div class="kpis">
+      <div class="kpi big"><div class="label">Debes en total</div><div class="value neg">${money(total)}</div></div>
+      <div class="kpi"><div class="label">Intereses al mes</div><div class="value neg">~${money(interest)}</div></div>
+      <div class="kpi"><div class="label">Mínimos del mes</div><div class="value">${money(mins)}</div></div>
+    </div>
+    <div class="card hl">
+      <h2>¿Con qué pago hoy?</h2>
+      ${usable.length
+        ? `<p>Usa <b>${esc(shortCard(usable[0].name))}</b>: si compras hoy, tienes ${usable[0].graceIfBuyToday ? `<b>${usable[0].graceIfBuyToday} días</b>` : 'tiempo'} para pagarlo sin intereses.</p>`
+        : `<p><b>Usa tu tarjeta de débito.</b> Todas tus tarjetas de crédito tienen saldo con intereses o están muy usadas. Lo que compres con ellas te cuesta más.</p>`}
+    </div>
+    <div class="card"><h2>Próximos pagos</h2>
+      ${upcoming.map((c) => `<div class="due ${c.daysToDue <= 5 ? 'urgent' : ''}">
+          <div class="when"><b>${fmtDate(c.dueDate)}</b>${est(c.dueSrc)}<div class="small">${inDays(c.daysToDue)}</div></div>
+          <div><div class="n">${esc(shortCard(c.name))}</div>
+            <div class="small">Mínimo <b>${c.minPayment != null ? money(c.minPayment) : '?'}</b>${est(c.minSrc)}${c.statementBalance ? ` · sin intereses: ${money(c.statementBalance)}` : ''}</div></div>
+        </div>`).join('') || '<p class="muted">Sin fechas todavía. Edita cada tarjeta para poner su fecha de pago.</p>'}
+      <button class="btn secondary" data-action="ics" style="margin-top:12px">📅 Agregar avisos al Calendario del iPhone</button>
+      <p class="small muted">Te avisa 3 días antes y 1 día antes de cada pago, aunque no abras la app.</p>
+    </div>
+    ${cards.map(cardBlock).join('')}
+    ${!hasLoan && loanFixed.length ? `<div class="card"><h2>¿Y tu préstamo?</h2><p class="small">Veo pagos de préstamo de ${money(loanFixed[0].amount)} ${esc(loanFixed[0].freq)}. Si me dices cuánto debes y a qué tasa, lo incluyo en el plan.</p>
+      <button class="btn secondary" data-action="addloan" data-pay="${loanFixed[0].perMonth.toFixed(2)}">Agregar préstamo</button></div>` : ''}
+    <button class="btn secondary" data-action="addloan" data-pay="">+ Agregar otra deuda</button>
+    ${anyEst ? '<p class="small muted"><span class="est">*</span> Dato estimado o típico: tócale "Editar datos" y escribe el real que ves en tu banco.</p>' : ''}`;
+}
+
+function cardBlock(c) {
+  const [ic, label, cls] = STATUS[c.status] || STATUS.cuidado;
+  const util = c.util != null ? Math.min(c.util, 1) : null;
+  const rows = [
+    ['Saldo', c.balance != null ? money(c.balance) + est(c.balanceSrc) : '<span class="neg">falta</span>'],
+    c.kind !== 'prestamo' ? ['Límite', c.limit ? money(c.limit) : '—'] : null,
+    ['Tasa anual', c.apr != null ? pct(c.apr) + (c.aprSrc === 'típica' ? '<span class="est">*</span>' : '') : '<span class="neg">falta</span>'],
+    ['Interés al mes', c.monthlyInterest ? `~${money(c.monthlyInterest)}` : '—'],
+    c.kind !== 'prestamo' ? ['Corte', c.cutDay ? `día ${c.cutDay}${c.cutSrc === 'intereses' ? '<span class="est">*</span>' : ''}` : '—'] : null,
+    ['Pago', c.dueDate ? `${fmtDate(c.dueDate)}${est(c.dueSrc)}` : '—'],
+  ].filter(Boolean);
+  return `<div class="card debt">
+    <div class="dhead"><div class="n">${esc(c.name)}</div><span class="badge ${cls}">${ic} ${label}</span></div>
+    ${c.why ? `<p class="small">${esc(c.why)}</p>` : ''}
+    ${util != null ? `<div class="ubar"><i style="width:${Math.max(util * 100, 2)}%" class="${util >= 0.7 ? 'bad' : util >= 0.3 ? 'mid' : 'ok'}"></i></div><div class="small muted">${Math.round(c.util * 100)}% del límite usado</div>` : ''}
+    <div class="grid2">${rows.map(([k, v]) => `<div class="muted small">${k}</div><div class="r">${v}</div>`).join('')}</div>
+    <button class="btn secondary sm" data-action="editcard" data-id="${esc(c.id)}">Editar datos</button>
+  </div>`;
+}
+
+function numField(id, label, val, hint = '', step = '0.01') {
+  return `<label class="field"><span>${label}</span><input id="${id}" type="number" inputmode="decimal" step="${step}" value="${val ?? ''}" placeholder="${esc(hint)}"></label>`;
+}
+
+function openCardEditor(id, pay) {
+  const a = id ? state.accounts.find((x) => x.id === id) : null;
+  const c = a ? cardInfo(a, state.txns, todayISO()) : null;
+  const u = a?.user || {};
+  const isLoan = !a || a.kind === 'prestamo';
+  $('#sheetPanel').innerHTML = `
+    <h3>${a ? esc(a.name) : 'Nueva deuda'}</h3>
+    <p class="small muted">Escribe lo que ves en la app de tu banco. Lo que dejes vacío se calcula de tus archivos.</p>
+    ${!a ? `<label class="field"><span>Nombre</span><input id="f-name" type="text" placeholder="Préstamo Scotiabank"></label>` : ''}
+    ${numField('f-balance', 'Saldo actual (lo que debes hoy)', u.balance, c?.balance != null ? `ahora: ${c.balance}` : '')}
+    ${!isLoan ? numField('f-limit', 'Límite de crédito', u.limit, c?.limit ? `ahora: ${c.limit}` : '') : ''}
+    ${numField('f-apr', 'Tasa de interés anual (%)', u.apr, c?.apr != null ? `ahora: ${c.apr}` : 'ej. 20.99')}
+    ${isLoan ? numField('f-payment', 'Pago al mes', u.payment ?? (pay || ''), '') : numField('f-min', 'Pago mínimo de este mes', u.minPayment, c?.minPayment != null ? `ahora: ${c.minPayment}` : '')}
+    ${!isLoan ? numField('f-stmt', 'Saldo del último estado (para no pagar intereses)', u.statementBalance, c?.statementBalance != null ? `ahora: ${c.statementBalance}` : '') : ''}
+    ${!isLoan ? numField('f-cut', 'Día de corte (1 a 31)', u.cutDay, c?.cutDay ? `ahora: ${c.cutDay}` : '', '1') : ''}
+    ${numField('f-due', 'Día de pago (1 a 31)', u.dueDay, c?.dueDate ? `ahora: ${Number(c.dueDate.slice(8))}` : '', '1')}
+    <button class="btn" data-action="savecard">Guardar</button>
+    ${a && a.kind === 'prestamo' ? `<button class="btn danger" data-action="delloan" data-id="${esc(a.id)}">Borrar esta deuda</button>` : ''}
+    <button class="btn secondary" data-close>Cancelar</button>`;
+  $('#sheetPanel').dataset.card = id || '';
+  $('#sheet').classList.remove('hidden');
+}
+
+async function saveCard() {
+  const id = $('#sheetPanel').dataset.card;
+  const v = (sel) => { const el = $(sel); if (!el || el.value === '') return null; const n = Number(el.value); return isFinite(n) ? n : null; };
+  let a = id ? state.accounts.find((x) => x.id === id) : null;
+  if (!a) {
+    const name = ($('#f-name')?.value || '').trim() || 'Préstamo';
+    a = { id: 'manual-' + Date.now().toString(36), name, kind: 'prestamo', bank: '', manual: true };
+  }
+  const prev = a.user || {};
+  const u = {};
+  const set = (k, val) => { if (val != null) u[k] = val; };
+  set('balance', v('#f-balance')); set('limit', v('#f-limit')); set('apr', v('#f-apr'));
+  set('minPayment', v('#f-min')); set('payment', v('#f-payment')); set('statementBalance', v('#f-stmt'));
+  const cut = v('#f-cut'), due = v('#f-due');
+  if (cut >= 1 && cut <= 31) u.cutDay = Math.round(cut);
+  if (due >= 1 && due <= 31) u.dueDay = Math.round(due);
+  u.balanceAt = u.balance != null && u.balance !== prev.balance ? new Date().toISOString() : prev.balanceAt;
+  a.user = u;
+  await db.putMany('accounts', [a]);
+  state.accounts = state.accounts.filter((x) => x.id !== a.id).concat(a);
+  closeSheet();
+  render();
+  toast('Guardado');
+}
+
+async function deleteLoan(id) {
+  if (!confirm('¿Borrar esta deuda?')) return;
+  await db.delMany('accounts', [id]);
+  state.accounts = state.accounts.filter((x) => x.id !== id);
+  closeSheet(); render();
+}
+
+async function downloadICS() {
+  const cards = allCards().filter((c) => c.dueDate);
+  if (!cards.length) { toast('Primero pon las fechas de pago de tus tarjetas'); return; }
+  const blob = new Blob([buildICS(cards)], { type: 'text/calendar' });
+  const url = URL.createObjectURL(blob);
+  // En iPhone, abrir el .ics muestra "Añadir todo" al Calendario.
+  const a = document.createElement('a');
+  a.href = url; a.download = 'pagos-tarjetas.ics';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  toast('Abre el archivo y toca "Añadir todo"');
+}
+
+// ---------- asesoría ----------
+
+function monthLabelFromNow(n) {
+  const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() + n);
+  return `${MESES[d.getMonth()]} ${d.getFullYear()}`;
+}
+const yearsMonths = (m) => (m === Infinity ? 'nunca' : m < 12 ? `${m} meses` : `${Math.floor(m / 12)} año${m >= 24 ? 's' : ''}${m % 12 ? ` y ${m % 12} meses` : ''}`);
+
+function renderAsesoria() {
+  const el = $('#view-asesoria');
+  if (!state.txns.length) { el.innerHTML = emptyState(); return; }
+  const fixed = fixedList();
+  const pic = monthlyPicture(state.txns, fixed);
+  const cards = allCards();
+  const hasLoanAcct = cards.some((c) => c.kind === 'prestamo');
+  const fijos = fixed.filter((f) => !(hasLoanAcct && f.cat === 'prestamos')).reduce((s, f) => s + f.perMonth, 0);
+  const income = state.settings.income ?? pic.income;
+  const debts = cards.filter((c) => c.balance > 0).map((c) => ({
+    id: c.id, name: shortCard(c.name), balance: c.balance, apr: c.apr ?? 12, aprMissing: c.apr == null,
+    min: c.minPayment ?? Math.max(10, Math.round(c.balance * 0.03)), fixedPayment: c.kind === 'prestamo', status: c.status,
+  }));
+  const mins = debts.reduce((s, d) => s + d.min, 0);
+  const libre = income - fijos - pic.variable - mins;
+  const strategy = state.settings.strategy || 'avalancha';
+  const plan = simulate(debts, mins + Math.max(0, libre), strategy);
+  const only = minimumsOnly(debts);
+  const cutCats = ['delivery', 'resto', 'alcohol', 'compras'];
+  const recorte = cutCats.reduce((s, k) => s + (pic.varByCat[k] || 0), 0) / 2;
+  const maxApr = Math.max(0, ...debts.map((d) => d.apr));
+  const extraInv = pic.invest > 0 && maxApr > 8 ? pic.invest : 0;
+  const plan2 = simulate(debts, mins + Math.max(0, libre + recorte + extraInv), strategy);
+  const libre2 = libre + recorte + extraInv;
+  const quietas = cards.filter((c) => c.status === 'quieta' && c.kind !== 'linea');
+  const line = cards.find((c) => c.kind === 'linea');
+  const first = plan.order?.[0];
+  const missing = debts.filter((d) => d.aprMissing).map((d) => d.name).concat(cards.filter((c) => c.balanceSrc === 'estimado' || c.balance == null).map((c) => shortCard(c.name)));
+  const topVar = Object.entries(pic.varByCat).sort((a, b) => b[1] - a[1]).slice(0, 3);
+
+  const steps = [];
+  if (libre < 0) steps.push(`<b>Hoy sale más de lo que entra: te faltan ${money(-libre)} al mes.</b> Antes de cualquier plan hay que recortar. Donde más se va el dinero variable: ${topVar.map(([k, v]) => `${CAT[k].name} (${money(v)})`).join(', ')}.`);
+  steps.push(`<b>Paga siempre el mínimo de todas a tiempo</b> (${money(mins)} al mes). Un pago tarde suma cargos, sube la tasa y baja tu puntaje de crédito. Los avisos del Calendario te ayudan con esto.`);
+  if (first && libre > 0) steps.push(`<b>Todo lo que sobra (${money(libre)} al mes) va a ${esc(first.name)}</b>, ${strategy === 'avalancha' ? `porque es la de tasa más alta (${pct(first.apr)})` : 'porque es la de saldo más chico'}. Cuando la termines, ese dinero pasa a la siguiente de la lista.`);
+  if (quietas.length) steps.push(`<b>Deja quietas ${quietas.map((c) => esc(shortCard(c.name))).join(', ')}</b>. Mientras tengan saldo, cada compra cobra interés desde el primer día. Para el día a día usa débito.`);
+  if (extraInv) steps.push(`<b>Considera pausar lo que mandas a inversión (${money(extraInv)} al mes)</b> y usarlo en deudas. Ninguna inversión normal te da ${pct(maxApr)} seguro, que es lo que te ahorras al pagar esa deuda. La excepción es si tu empleador iguala tu aporte.`);
+  if (recorte > 20) steps.push(`<b>Recorta a la mitad comida a domicilio, restaurantes, licor y compras</b>: liberas unos ${money(recorte)} al mes.`);
+  if (line && maxApr > (line.apr ?? 99)) steps.push(`<b>Pregunta en Scotiabank</b> si puedes pasar la deuda de la tarjeta más cara a tu ScotiaLine (${pct(line.apr)}). Pagarías menos interés, pero solo sirve si después no vuelves a usar esa tarjeta.`);
+  else if (line && line.apr == null) steps.push(`<b>Escribe la tasa de tu ScotiaLine</b> en Deudas. Si es más baja que la de tus tarjetas, conviene usarla para pagar la tarjeta más cara.`);
+  steps.push(`<b>Guarda un colchón pequeño</b> (unos $1,000 en tu cuenta de cheques) para emergencias, así no vuelves a usar las tarjetas cuando algo pase.`);
+
+  el.innerHTML = `
+    ${missing.length ? `<div class="alert warn" data-action="goto" data-view="deudas">Faltan datos reales de: ${esc([...new Set(missing)].join(', '))}. El plan usa estimaciones hasta que los escribas en <b>Deudas</b>.</div>` : ''}
+    <div class="card"><h2>Tu mes típico</h2>
+      <div class="grid2 big">
+        <div>Entra</div><div class="r pos">${money(income)}</div>
+        <div>Gastos fijos</div><div class="r">−${money(fijos)}</div>
+        <div>Gastos del día a día</div><div class="r">−${money(pic.variable)}</div>
+        <div>Mínimos de deudas</div><div class="r">−${money(mins)}</div>
+        <div class="tot">Queda libre</div><div class="r tot ${libre >= 0 ? 'pos' : 'neg'}">${money(libre)}</div>
+      </div>
+      <p class="small muted">Calculado con tus últimos 30 días (${fmtDate(pic.start)} a ${fmtDate(pic.end)})${pic.incomeNote ? `, ${esc(pic.incomeNote)}` : ''}. Intereses e inversión van aparte.</p>
+      <label class="field inline"><span>¿Tu ingreso mensual es otro?</span><input id="f-income" type="number" inputmode="decimal" value="${state.settings.income ?? ''}" placeholder="${Math.round(pic.income)}"><button class="btn sm" data-action="saveincome">OK</button></label>
+    </div>
+    <div class="card hl"><h2>Qué hacer</h2><ol class="steps">${steps.map((s) => `<li>${s}</li>`).join('')}</ol></div>
+    ${debts.length ? `<div class="card"><h2>Tu camino para salir de deudas</h2>
+      <div class="seg"><button data-action="strategy" data-s="avalancha" class="${strategy === 'avalancha' ? 'sel' : ''}">Pagar menos intereses</button><button data-action="strategy" data-s="bolaDeNieve" class="${strategy === 'bolaDeNieve' ? 'sel' : ''}">Ver avances rápido</button></div>
+      ${plan.feasible && libre >= 0 ? `<p>Con este plan terminas en <b>${yearsMonths(plan.months)}</b> (${monthLabelFromNow(plan.months)}) y pagas <b>${money(plan.totalInterest)}</b> de intereses.</p>
+        <ol class="order">${plan.order.map((d) => `<li><b>${esc(d.name)}</b> · ${money(d.balance)} al ${pct(d.apr)}${d.aprMissing ? '<span class="est">*</span>' : ''}<div class="small muted">Pagada en ${monthLabelFromNow(d.paidOffMonth)}</div></li>`).join('')}</ol>`
+        : `<p class="neg">Con lo que entra hoy no alcanza para bajar las deudas más allá de los mínimos. Primero hay que cerrar ese hueco.</p>
+          <p class="small">Cuando sobre dinero, este es el orden para atacarlas:</p>
+          <ol class="order">${plan.order.map((d) => `<li><b>${esc(d.name)}</b> · ${money(d.balance)} al ${pct(d.apr)}${d.aprMissing ? '<span class="est">*</span>' : ''}</li>`).join('')}</ol>`}
+      <p class="small">Pagando solo los mínimos: <b>${yearsMonths(only.months)}</b> y ${money(only.totalInterest)} de intereses.</p>
+      ${(recorte > 20 || extraInv) ? (libre2 > 0 && plan2.feasible
+        ? `<p class="small">Si recortas lo de arriba${extraInv ? ' y pausas la inversión' : ''}, te quedan ${money(libre2)} libres al mes: terminas en <b>${yearsMonths(plan2.months)}</b> y te ahorras ${money(Math.max(0, (plan.feasible && libre >= 0 ? plan.totalInterest : only.totalInterest) - plan2.totalInterest))} en intereses.</p>`
+        : `<p class="small">Aun recortando lo de arriba${extraInv ? ' y pausando la inversión' : ''} (${money(recorte + extraInv)} al mes) faltarían ${money(-libre2)} al mes. Revisa los gastos fijos más grandes.</p>`) : ''}
+    </div>` : ''}
+    <p class="small muted">Esto es orientación general calculada con tus números, no asesoría financiera profesional. Antes de mover deudas entre productos, confirma tasas y condiciones con tu banco.</p>`;
+}
+
+async function saveIncome() {
+  const v = Number($('#f-income').value);
+  if ($('#f-income').value === '' ) delete state.settings.income; else if (isFinite(v) && v > 0) state.settings.income = v;
+  await db.kvSet('settings', state.settings);
+  renderAsesoria();
+  toast('Ingreso actualizado');
 }
 
 // ---------- utilidades de UI ----------
@@ -382,6 +665,14 @@ document.addEventListener('click', (e) => {
   if (act === 'restore') $('#restoreInput').click();
   if (act === 'wipe') wipe();
   if (act === 'clearcat') { state.filterCat = ''; render(); }
+  if (act === 'editcard') openCardEditor(e.target.closest('[data-action]').dataset.id);
+  if (act === 'savecard') saveCard();
+  if (act === 'addloan') openCardEditor(null, e.target.closest('[data-action]').dataset.pay);
+  if (act === 'delloan') deleteLoan(e.target.closest('[data-action]').dataset.id);
+  if (act === 'ics') downloadICS();
+  if (act === 'goto') { state.view = e.target.closest('[data-action]').dataset.view; render(); window.scrollTo(0, 0); }
+  if (act === 'strategy') { state.settings.strategy = e.target.closest('[data-action]').dataset.s; db.kvSet('settings', state.settings); renderAsesoria(); }
+  if (act === 'saveincome') saveIncome();
   if (act) return;
   const cat = e.target.closest('[data-cat]');
   if (cat) { state.filterCat = cat.dataset.cat; state.view = 'movs'; render(); window.scrollTo(0, 0); return; }
@@ -399,6 +690,12 @@ document.addEventListener('input', (e) => {
 });
 document.addEventListener('change', (e) => {
   if (e.target.id === 'fAcct') { state.filterAcct = e.target.value; renderMovs(); }
+  if (e.target.id === 'isFixed') {
+    state.fixedOv[e.target.dataset.key] = e.target.checked;
+    db.kvSet('fixed', state.fixedOv);
+    toast(e.target.checked ? 'Marcado como gasto fijo' : 'Ya no es gasto fijo');
+    render();
+  }
 });
 $('#fileInput').addEventListener('change', async (e) => {
   const files = [...e.target.files];

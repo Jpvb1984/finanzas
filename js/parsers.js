@@ -7,6 +7,11 @@
 const MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
 
 const pad = (n) => String(n).padStart(2, '0');
+export function shiftISO(iso, days) {
+  const d = new Date(iso + 'T12:00:00Z');
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
 const clean = (s) => (s == null ? '' : String(s)).replace(/\s+/g, ' ').trim();
 const num = (v) => {
   if (typeof v === 'number') return v;
@@ -60,7 +65,7 @@ export function parseWorkbook(sheets, fileName) {
     const headerIdx = sh.rows.findIndex((r) => r && r.some((c) => clean(c) === 'Date') && r.some((c) => clean(c) === 'Description'));
     if (headerIdx < 0) continue;
     const header = sh.rows[headerIdx].map(clean);
-    if (header.includes('Date Processed')) return parseAmex(sh.rows, headerIdx, header);
+    if (header.includes('Date Processed')) return parseAmex(sh.rows, headerIdx, header, sheets);
     if (header.includes('Type of Transaction')) return parseScotia(sh.rows, headerIdx, header, fileName);
   }
   throw new Error('No reconozco este archivo de Excel.');
@@ -97,7 +102,7 @@ function parseScotia(rows, headerIdx, header, fileName) {
   return { account, txns, meta: { ...meta, skippedPending } };
 }
 
-function parseAmex(rows, headerIdx, header) {
+function parseAmex(rows, headerIdx, header, sheets = []) {
   const title = rows.slice(0, headerIdx).flat().map(clean).find((c) => /American Express/i.test(c)) || 'American Express';
   const acctCell = rows.slice(0, headerIdx).flat().map(clean).find((c) => /^X{3,}/i.test(c)) || '';
   const digits = acctCell.replace(/\D/g, '').slice(-5) || '0000';
@@ -106,6 +111,16 @@ function parseAmex(rows, headerIdx, header) {
   const period = title.match(/(\d{1,2} \w{3} \d{4}) to (\d{1,2} \w{3} \d{4})/);
   const meta = {};
   if (period) { meta.periodStart = toISODate(period[1]); meta.periodEnd = toISODate(period[2]); meta.cutDay = Number(meta.periodEnd.slice(8)); }
+  // Hoja de resumen: saldo total y último estado facturado.
+  for (const sh of sheets) {
+    for (const r of sh.rows) {
+      const k = clean(r?.[0]).toLowerCase();
+      if (k === 'total balance' && isFinite(num(r[1]))) meta.balance = num(r[1]);
+      if (k === 'last billed statement' && isFinite(num(r[1]))) meta.statementBalance = num(r[1]);
+      if (k === 'payments & credits' && isFinite(num(r[1]))) meta.paidSinceStatement = num(r[1]);
+    }
+  }
+  if (meta.periodStart) meta.lastCut = shiftISO(meta.periodStart, -1);
   const c = (n) => header.indexOf(n);
   const cDate = c('Date'), cDesc = c('Description'), cAmt = c('Amount'), cMer = c('Merchant');
   const txns = [];
@@ -155,7 +170,13 @@ function parseCanadianTire(rows, headerIdx) {
   const account = { id: 'ctfs', name: 'Canadian Tire Mastercard', kind: 'credito', bank: 'Canadian Tire' };
   const meta = {};
   const sumIdx = rows.findIndex((r) => clean(r[0]) === 'Start Date');
-  if (sumIdx >= 0 && rows[sumIdx + 1]) meta.balance = num(rows[sumIdx + 1][2]);
+  if (sumIdx >= 0 && rows[sumIdx + 1]) {
+    const r = rows[sumIdx + 1];
+    meta.balance = num(r[2]);
+    const avail = num(r[3]);
+    if (isFinite(meta.balance) && isFinite(avail)) meta.limitApprox = Math.round((meta.balance + avail) / 100) * 100;
+    meta.balanceAsOf = toISODate(r[1]);
+  }
   const txns = [];
   for (const r of rows.slice(headerIdx + 1)) {
     if (!r || !r[cDate]) continue;
@@ -219,6 +240,7 @@ function parseCapOneStatement(lines, text) {
     meta.periodStart = toISODate(per[1]);
     meta.periodEnd = toISODate(per[2]);
     meta.cutDay = Number(meta.periodEnd.slice(8));
+    meta.lastCut = meta.periodEnd;
     const [sy, sm] = meta.periodStart.split('-').map(Number);
     const ey = Number(meta.periodEnd.slice(0, 4));
     // Una compra del 13 de oct puede aparecer en un estado que empieza el 14 de oct.
@@ -226,6 +248,10 @@ function parseCapOneStatement(lines, text) {
   }
   const due = text.match(/Payment Due Date[\s\S]{0,200}?(\w{3} \d{1,2}, \d{4})/i) || text.match(/Due Date[\s\S]{0,120}?(\w{3} \d{1,2}, \d{4})/i);
   if (due) meta.dueDate = toISODate(due[1]);
+  const lim = text.match(/Credit Limit\s+\$([\d,]+\.\d{2})/i);
+  if (lim) meta.limit = num(lim[1]);
+  const apr = text.match(/Purchases\s+[\d.]+%\s+([\d.]+)%/i);
+  if (apr) meta.apr = Number(apr[1]);
   const nb = text.match(/New Balance\s*=\s*\$([\d,]+\.\d{2})/i) || text.match(/New Balance[\s\S]{0,80}?\$([\d,]+\.\d{2})/i);
   const mp = text.match(/\$[\d,]+\.\d{2}\s+\$([\d,]+\.\d{2})\s+\w{3} \d{1,2}, \d{4}/);
   if (mp) meta.minPayment = num(mp[1]);
