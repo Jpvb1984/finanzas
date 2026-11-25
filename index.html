@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Finanzas</title>
+  <meta name="theme-color" content="#0b7a5a">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Finanzas">
+  <meta name="robots" content="noindex, nofollow">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; worker-src 'self' blob:; connect-src 'self'">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="top">
+    <button class="icon-btn" id="prevMonth" aria-label="Mes anterior">‹</button>
+    <h1 id="monthLabel">Finanzas</h1>
+    <button class="icon-btn" id="nextMonth" aria-label="Mes siguiente">›</button>
+  </header>
+
+  <main>
+    <section id="view-resumen" class="view active"></section>
+    <section id="view-movs" class="view"></section>
+    <section id="view-cuentas" class="view"></section>
+  </main>
+
+  <nav class="tabs">
+    <button data-view="resumen" class="active"><span>📊</span>Resumen</button>
+    <button data-view="movs"><span>🧾</span>Movimientos</button>
+    <button data-view="cuentas"><span>💳</span>Cuentas</button>
+  </nav>
+
+  <div id="sheet" class="sheet hidden" role="dialog" aria-modal="true">
+    <div class="sheet-backdrop" data-close></div>
+    <div class="sheet-panel" id="sheetPanel"></div>
+  </div>
+  <div id="toast" class="toast hidden"></div>
+  <input type="file" id="fileInput" multiple accept=".csv,.xlsx,.xls,.pdf,text/csv,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden>
+  <input type="file" id="restoreInput" accept=".json,application/json" hidden>
+
+  <script src="vendor/xlsx.mini.min.js"></script>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
