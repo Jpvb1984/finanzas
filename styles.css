@@ -102,7 +102,8 @@ main { max-width: 640px; margin: 0 auto; padding: 12px 16px; }
 }
 .chip { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); border: 0; font-size: 14px; font-weight: 600; }
 
-.day { font-size: 13px; color: var(--muted); margin: 14px 4px 6px; text-transform: capitalize; }
+.day { font-size: 13px; color: var(--muted); margin: 14px 4px 6px; }
+.day::first-letter { text-transform: uppercase; }
 .tx { display: grid; grid-template-columns: 36px 1fr auto; gap: 10px; align-items: center; padding: 10px 12px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; margin-bottom: 6px; cursor: pointer; }
 .tx .ic { font-size: 22px; text-align: center; }
 .tx .d { min-width: 0; }
